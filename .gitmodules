@@ -1,0 +1,4 @@
+[submodule "third_party/Xray-core"]
+	path = third_party/Xray-core
+	url = https://github.com/XTLS/Xray-core/
+	branch = origin/tags/v26.5.9

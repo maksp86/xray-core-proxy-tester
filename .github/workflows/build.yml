@@ -1,0 +1,96 @@
+name: Build and Release
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            asset_name: linux-x64
+            binary_name: proxy-tester
+          - goos: linux
+            goarch: arm64
+            asset_name: linux-arm64
+            binary_name: proxy-tester
+          - goos: windows
+            goarch: amd64
+            asset_name: windows-x64
+            binary_name: proxy-tester.exe
+          - goos: windows
+            goarch: arm64
+            asset_name: windows-arm64
+            binary_name: proxy-tester.exe
+
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: 0
+
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Show workflow information
+        run: |
+          echo "GOOS: $GOOS, GOARCH: $GOARCH, ASSET_NAME: ${{ matrix.asset_name }}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Get project dependencies
+        run: go mod download
+
+      - name: Build proxy tester
+        run: |
+          mkdir -p build_assets
+          go build -o "build_assets/${{ matrix.binary_name }}" \
+            -trimpath \
+            -buildvcs=false \
+            -gcflags="all=-l=4" \
+            -ldflags="-s -w -buildid=" \
+            -v ./cmd/proxy-tester
+
+      - name: Copy README
+        run: cp README.md build_assets/README.md
+
+      - name: Create ZIP archive
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          pushd build_assets || exit 1
+          touch -mt $(date +%Y01010000) *
+          zip -9vr "../proxy-tester-${{ matrix.asset_name }}.zip" .
+          popd || exit 1
+
+      - name: Upload binaries to release
+        if: github.event_name == 'release'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./proxy-tester-${{ matrix.asset_name }}.zip
+          tag: ${{ github.event.release.tag_name }}
+          file_glob: false
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: proxy-tester-${{ matrix.asset_name }}
+          path: build_assets/*
