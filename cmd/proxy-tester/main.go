@@ -30,6 +30,7 @@ func main() {
 	var exitIPURLs stringList
 	cfg := tester.Config{}
 	var outboundsFile string
+	var geoIP2Path string
 	var downloadTimeout time.Duration
 	var connectTimeout time.Duration
 
@@ -38,6 +39,7 @@ func main() {
 	flag.IntVar(&cfg.Retries, "retries", 1, "number of test attempts per outbound")
 	flag.Var(&exitIPURLs, "exit-ip-url", "URL used to detect exit IP; may be repeated or comma-separated")
 	flag.StringVar(&outboundsFile, "outbounds-file", "", "JSON file with outbounds; stdin is used when omitted or set to '-'")
+	flag.StringVar(&geoIP2Path, "geoip2-db-path", "", "optional path to GeoIP2/GeoLite2 City database (.mmdb)")
 	flag.DurationVar(&downloadTimeout, "download-timeout", 30*time.Second, "timeout for speed-test download")
 	flag.DurationVar(&connectTimeout, "connect-timeout", 10*time.Second, "timeout for URL test and exit-IP requests")
 	flag.IntVar(&cfg.Parallelism, "parallelism", 1, "maximum number of outbounds tested concurrently")
@@ -48,6 +50,7 @@ func main() {
 	cfg.ExitIPURLs = exitIPURLs
 	cfg.DownloadTimeout = downloadTimeout
 	cfg.ConnectTimeout = connectTimeout
+	cfg.GeoIP2DBPath = geoIP2Path
 
 	input, err := readInput(outboundsFile)
 	if err != nil {

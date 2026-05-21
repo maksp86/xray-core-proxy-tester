@@ -64,6 +64,7 @@ If `tag` is missing, the app assigns a stable tag such as `outbound-1`. Duplicat
 * `--outbounds-file`: JSON file with outbounds; if omitted or set to `-`, stdin is used
 * `--download-timeout`: download timeout for speed tests
 * `--connect-timeout`: timeout for URL tests and exit IP requests
+* `--geoip2-db-path`: optional path to GeoIP2/GeoLite2 City database (`.mmdb`); when set and exit IP is detected, adds `country` and `city` to result
 * `--parallelism`: maximum number of outbounds tested at once; each outbound runs in its own Xray instance without a local SOCKS proxy
 * `--min-speed-mbps`: optional minimum speed threshold; if not reached, the reason is `speed_below_threshold`
 * `--max-latency-ms`: optional maximum latency threshold; if exceeded, the reason is `latency_exceeded`
@@ -77,9 +78,12 @@ If `tag` is missing, the app assigns a stable tag such as `outbound-1`. Duplicat
     "speed": null,
     "latency": 123.4,
     "exit-ip": "203.0.113.10",
+    "country": "US",
+    "city": "Los Angeles",
     "reason": "ok"
   }
 }
 ```
 
 `speed` is reported in megabits per second for `speed` tests. `latency` is reported in milliseconds for `url` tests.
+If GeoIP2 is not configured (or no data found), `country` / `city` are returned as `null`.

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oschwald/geoip2-golang"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	_ "github.com/xtls/xray-core/main/distro/all"
@@ -38,6 +39,7 @@ type Config struct {
 	Parallelism     int
 	MinSpeedMbps    float64
 	MaxLatencyMS    float64
+	GeoIP2DBPath    string
 }
 
 type Outbound struct {
@@ -50,6 +52,8 @@ type Result struct {
 	Speed   *float64 `json:"speed"`
 	Latency *float64 `json:"latency"`
 	ExitIP  *string  `json:"exit-ip"`
+	Country *string  `json:"country"`
+	City    *string  `json:"city"`
 	Reason  string   `json:"reason"`
 }
 
@@ -101,6 +105,12 @@ func Run(ctx context.Context, cfg Config, outbounds []Outbound) (map[string]Resu
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	geoResolver, err := newGeoResolver(cfg.GeoIP2DBPath)
+	if err != nil {
+		return nil, err
+	}
+	defer geoResolver.Close()
+
 	results := make(map[string]Result, len(outbounds))
 	jobs := make(chan Outbound)
 	var mu sync.Mutex
@@ -111,7 +121,7 @@ func Run(ctx context.Context, cfg Config, outbounds []Outbound) (map[string]Resu
 		go func() {
 			defer wg.Done()
 			for outbound := range jobs {
-				result := testOutbound(ctx, cfg, outbound)
+				result := testOutbound(ctx, cfg, outbound, geoResolver)
 				mu.Lock()
 				results[outbound.Tag] = result
 				mu.Unlock()
@@ -152,7 +162,7 @@ func (cfg *Config) validate() error {
 	return nil
 }
 
-func testOutbound(ctx context.Context, cfg Config, outbound Outbound) Result {
+func testOutbound(ctx context.Context, cfg Config, outbound Outbound, geoResolver *geoResolver) Result {
 	configJSON, err := buildConfig(outbound.Raw)
 	if err != nil {
 		return Result{Result: false, Reason: ReasonInvalidOutbound}
@@ -176,10 +186,10 @@ func testOutbound(ctx context.Context, cfg Config, outbound Outbound) Result {
 	if cfg.TestType == "speed" {
 		return runSpeedTest(ctx, client, cfg)
 	}
-	return runURLTest(ctx, client, cfg)
+	return runURLTest(ctx, client, cfg, geoResolver)
 }
 
-func runURLTest(ctx context.Context, client *http.Client, cfg Config) Result {
+func runURLTest(ctx context.Context, client *http.Client, cfg Config, geoResolver *geoResolver) Result {
 	var lastErr error
 	for attempt := 0; attempt < cfg.Retries; attempt++ {
 		latency, err := requestLatency(ctx, client, cfg.TestURL, cfg.ConnectTimeout, false)
@@ -190,12 +200,61 @@ func runURLTest(ctx context.Context, client *http.Client, cfg Config) Result {
 				result.Reason = ReasonLatencyExceeded
 			}
 			result.ExitIP = detectExitIP(ctx, client, cfg.ExitIPURLs, cfg.ConnectTimeout)
+			result.Country, result.City = geoResolver.Lookup(result.ExitIP)
 			return result
 		}
 		lastErr = err
 	}
 	_ = lastErr
 	return Result{Result: false, Reason: ReasonTestFailed}
+}
+
+type geoResolver struct {
+	db *geoip2.Reader
+}
+
+func newGeoResolver(dbPath string) (*geoResolver, error) {
+	dbPath = strings.TrimSpace(dbPath)
+	if dbPath == "" {
+		return &geoResolver{}, nil
+	}
+	db, err := geoip2.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open geoip2 db %q: %w", dbPath, err)
+	}
+	return &geoResolver{db: db}, nil
+}
+
+func (r *geoResolver) Close() error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Close()
+}
+
+func (r *geoResolver) Lookup(ip *string) (*string, *string) {
+	if r == nil || r.db == nil || ip == nil {
+		return nil, nil
+	}
+	parsedIP := net.ParseIP(strings.TrimSpace(*ip))
+	if parsedIP == nil {
+		return nil, nil
+	}
+	record, err := r.db.City(parsedIP)
+	if err != nil {
+		return nil, nil
+	}
+	var country *string
+	if record.Country.IsoCode != "" {
+		value := record.Country.IsoCode
+		country = &value
+	}
+	var city *string
+	if name, ok := record.City.Names["en"]; ok && strings.TrimSpace(name) != "" {
+		value := name
+		city = &value
+	}
+	return country, city
 }
 
 func runSpeedTest(ctx context.Context, client *http.Client, cfg Config) Result {
