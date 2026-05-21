@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oschwald/geoip2-golang"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	_ "github.com/xtls/xray-core/main/distro/all"
@@ -33,11 +34,12 @@ type Config struct {
 	TestURL         string
 	Retries         int
 	ExitIPURLs      []string
-	DownloadTimeout time.Duration
-	ConnectTimeout  time.Duration
+	DownloadTimeout float64
+	ConnectTimeout  float64
 	Parallelism     int
 	MinSpeedMbps    float64
 	MaxLatencyMS    float64
+	GeoIP2DBPath    string
 }
 
 type Outbound struct {
@@ -50,6 +52,8 @@ type Result struct {
 	Speed   *float64 `json:"speed"`
 	Latency *float64 `json:"latency"`
 	ExitIP  *string  `json:"exit-ip"`
+	Country *string  `json:"country"`
+	City    *string  `json:"city"`
 	Reason  string   `json:"reason"`
 }
 
@@ -101,6 +105,12 @@ func Run(ctx context.Context, cfg Config, outbounds []Outbound) (map[string]Resu
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	geoResolver, err := newGeoResolver(cfg.GeoIP2DBPath)
+	if err != nil {
+		return nil, err
+	}
+	defer geoResolver.Close()
+
 	results := make(map[string]Result, len(outbounds))
 	jobs := make(chan Outbound)
 	var mu sync.Mutex
@@ -111,7 +121,7 @@ func Run(ctx context.Context, cfg Config, outbounds []Outbound) (map[string]Resu
 		go func() {
 			defer wg.Done()
 			for outbound := range jobs {
-				result := testOutbound(ctx, cfg, outbound)
+				result := testOutbound(ctx, cfg, outbound, geoResolver)
 				mu.Lock()
 				results[outbound.Tag] = result
 				mu.Unlock()
@@ -144,15 +154,15 @@ func (cfg *Config) validate() error {
 		cfg.Parallelism = 1
 	}
 	if cfg.DownloadTimeout <= 0 {
-		cfg.DownloadTimeout = 30 * time.Second
+		cfg.DownloadTimeout = 30000
 	}
 	if cfg.ConnectTimeout <= 0 {
-		cfg.ConnectTimeout = 10 * time.Second
+		cfg.ConnectTimeout = 10000
 	}
 	return nil
 }
 
-func testOutbound(ctx context.Context, cfg Config, outbound Outbound) Result {
+func testOutbound(ctx context.Context, cfg Config, outbound Outbound, geoResolver *geoResolver) Result {
 	configJSON, err := buildConfig(outbound.Raw)
 	if err != nil {
 		return Result{Result: false, Reason: ReasonInvalidOutbound}
@@ -176,20 +186,22 @@ func testOutbound(ctx context.Context, cfg Config, outbound Outbound) Result {
 	if cfg.TestType == "speed" {
 		return runSpeedTest(ctx, client, cfg)
 	}
-	return runURLTest(ctx, client, cfg)
+	return runURLTest(ctx, client, cfg, geoResolver)
 }
 
-func runURLTest(ctx context.Context, client *http.Client, cfg Config) Result {
+func runURLTest(ctx context.Context, client *http.Client, cfg Config, geoResolver *geoResolver) Result {
 	var lastErr error
 	for attempt := 0; attempt < cfg.Retries; attempt++ {
-		latency, err := requestLatency(ctx, client, cfg.TestURL, cfg.ConnectTimeout, false)
+		timeout := time.Duration(cfg.ConnectTimeout) * time.Millisecond
+		latency, err := requestLatency(ctx, client, cfg.TestURL, timeout, false)
 		if err == nil {
 			result := Result{Result: true, Latency: &latency, Reason: ReasonOK}
 			if cfg.MaxLatencyMS > 0 && latency > cfg.MaxLatencyMS {
 				result.Result = false
 				result.Reason = ReasonLatencyExceeded
 			}
-			result.ExitIP = detectExitIP(ctx, client, cfg.ExitIPURLs, cfg.ConnectTimeout)
+			result.ExitIP = detectExitIP(ctx, client, cfg.ExitIPURLs, timeout)
+			result.Country, result.City = geoResolver.Lookup(result.ExitIP)
 			return result
 		}
 		lastErr = err
@@ -198,10 +210,58 @@ func runURLTest(ctx context.Context, client *http.Client, cfg Config) Result {
 	return Result{Result: false, Reason: ReasonTestFailed}
 }
 
+type geoResolver struct {
+	db *geoip2.Reader
+}
+
+func newGeoResolver(dbPath string) (*geoResolver, error) {
+	dbPath = strings.TrimSpace(dbPath)
+	if dbPath == "" {
+		return &geoResolver{}, nil
+	}
+	db, err := geoip2.Open(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open geoip2 db %q: %w", dbPath, err)
+	}
+	return &geoResolver{db: db}, nil
+}
+
+func (r *geoResolver) Close() error {
+	if r == nil || r.db == nil {
+		return nil
+	}
+	return r.db.Close()
+}
+
+func (r *geoResolver) Lookup(ip *string) (*string, *string) {
+	if r == nil || r.db == nil || ip == nil {
+		return nil, nil
+	}
+	parsedIP := net.ParseIP(strings.TrimSpace(*ip))
+	if parsedIP == nil {
+		return nil, nil
+	}
+	record, err := r.db.City(parsedIP)
+	if err != nil {
+		return nil, nil
+	}
+	var country *string
+	if record.Country.IsoCode != "" {
+		value := record.Country.IsoCode
+		country = &value
+	}
+	var city *string
+	if name, ok := record.City.Names["en"]; ok && strings.TrimSpace(name) != "" {
+		value := name
+		city = &value
+	}
+	return country, city
+}
+
 func runSpeedTest(ctx context.Context, client *http.Client, cfg Config) Result {
 	var lastErr error
 	for attempt := 0; attempt < cfg.Retries; attempt++ {
-		speed, err := downloadSpeed(ctx, client, cfg.TestURL, cfg.DownloadTimeout)
+		speed, err := downloadSpeed(ctx, client, cfg.TestURL, time.Duration(cfg.DownloadTimeout)*time.Millisecond)
 		if err == nil {
 			result := Result{Result: true, Speed: &speed, Reason: ReasonOK}
 			if cfg.MinSpeedMbps > 0 && speed < cfg.MinSpeedMbps {
@@ -314,7 +374,7 @@ func buildConfig(outbound json.RawMessage) ([]byte, error) {
 		return nil, errors.New("outbound protocol is required")
 	}
 	config := map[string]any{
-		"log":       map[string]any{"loglevel": "none"},
+		"log":       map[string]any{"loglevel": "none", "access": "none", "error": "none"},
 		"outbounds": []json.RawMessage{outbound},
 	}
 	data, err := json.Marshal(config)
@@ -327,7 +387,8 @@ func buildConfig(outbound json.RawMessage) ([]byte, error) {
 	return data, nil
 }
 
-func xrayHTTPTransport(instance *core.Instance, timeout time.Duration) *http.Transport {
+func xrayHTTPTransport(instance *core.Instance, timeout_ms float64) *http.Transport {
+	timeout := time.Duration(timeout_ms) * time.Millisecond
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			dest, err := xnet.ParseDestination(network + ":" + address)
