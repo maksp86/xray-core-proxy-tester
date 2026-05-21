@@ -34,8 +34,8 @@ type Config struct {
 	TestURL         string
 	Retries         int
 	ExitIPURLs      []string
-	DownloadTimeout time.Duration
-	ConnectTimeout  time.Duration
+	DownloadTimeout float64
+	ConnectTimeout  float64
 	Parallelism     int
 	MinSpeedMbps    float64
 	MaxLatencyMS    float64
@@ -154,10 +154,10 @@ func (cfg *Config) validate() error {
 		cfg.Parallelism = 1
 	}
 	if cfg.DownloadTimeout <= 0 {
-		cfg.DownloadTimeout = 30 * time.Second
+		cfg.DownloadTimeout = 30000
 	}
 	if cfg.ConnectTimeout <= 0 {
-		cfg.ConnectTimeout = 10 * time.Second
+		cfg.ConnectTimeout = 10000
 	}
 	return nil
 }
@@ -192,14 +192,15 @@ func testOutbound(ctx context.Context, cfg Config, outbound Outbound, geoResolve
 func runURLTest(ctx context.Context, client *http.Client, cfg Config, geoResolver *geoResolver) Result {
 	var lastErr error
 	for attempt := 0; attempt < cfg.Retries; attempt++ {
-		latency, err := requestLatency(ctx, client, cfg.TestURL, cfg.ConnectTimeout, false)
+		timeout := time.Duration(cfg.ConnectTimeout) * time.Millisecond
+		latency, err := requestLatency(ctx, client, cfg.TestURL, timeout, false)
 		if err == nil {
 			result := Result{Result: true, Latency: &latency, Reason: ReasonOK}
 			if cfg.MaxLatencyMS > 0 && latency > cfg.MaxLatencyMS {
 				result.Result = false
 				result.Reason = ReasonLatencyExceeded
 			}
-			result.ExitIP = detectExitIP(ctx, client, cfg.ExitIPURLs, cfg.ConnectTimeout)
+			result.ExitIP = detectExitIP(ctx, client, cfg.ExitIPURLs, timeout)
 			result.Country, result.City = geoResolver.Lookup(result.ExitIP)
 			return result
 		}
@@ -260,7 +261,7 @@ func (r *geoResolver) Lookup(ip *string) (*string, *string) {
 func runSpeedTest(ctx context.Context, client *http.Client, cfg Config) Result {
 	var lastErr error
 	for attempt := 0; attempt < cfg.Retries; attempt++ {
-		speed, err := downloadSpeed(ctx, client, cfg.TestURL, cfg.DownloadTimeout)
+		speed, err := downloadSpeed(ctx, client, cfg.TestURL, time.Duration(cfg.DownloadTimeout)*time.Millisecond)
 		if err == nil {
 			result := Result{Result: true, Speed: &speed, Reason: ReasonOK}
 			if cfg.MinSpeedMbps > 0 && speed < cfg.MinSpeedMbps {
@@ -373,7 +374,7 @@ func buildConfig(outbound json.RawMessage) ([]byte, error) {
 		return nil, errors.New("outbound protocol is required")
 	}
 	config := map[string]any{
-		"log":       map[string]any{"loglevel": "none"},
+		"log":       map[string]any{"loglevel": "none", "access": "none", "error": "none"},
 		"outbounds": []json.RawMessage{outbound},
 	}
 	data, err := json.Marshal(config)
@@ -386,7 +387,8 @@ func buildConfig(outbound json.RawMessage) ([]byte, error) {
 	return data, nil
 }
 
-func xrayHTTPTransport(instance *core.Instance, timeout time.Duration) *http.Transport {
+func xrayHTTPTransport(instance *core.Instance, timeout_ms float64) *http.Transport {
+	timeout := time.Duration(timeout_ms) * time.Millisecond
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 			dest, err := xnet.ParseDestination(network + ":" + address)

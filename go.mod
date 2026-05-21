@@ -4,6 +4,8 @@ go 1.26
 
 require github.com/xtls/xray-core v0.0.0
 
+require github.com/oschwald/maxminddb-golang v1.13.0 // indirect
+
 require (
 	github.com/andybalholm/brotli v1.0.6 // indirect
 	github.com/apernet/quic-go v0.59.1-0.20260425001925-6c6cc9bcb716 // indirect
