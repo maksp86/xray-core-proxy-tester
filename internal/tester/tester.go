@@ -34,11 +34,11 @@ type Config struct {
 	TestURL         string
 	Retries         int
 	ExitIPURLs      []string
-	DownloadTimeout float64
-	ConnectTimeout  float64
+	DownloadTimeout int
+	ConnectTimeout  int
 	Parallelism     int
 	MinSpeedMbps    float64
-	MaxLatencyMS    float64
+	MaxLatencyMS    int
 	GeoIP2DBPath    string
 }
 
@@ -196,7 +196,7 @@ func runURLTest(ctx context.Context, client *http.Client, cfg Config, geoResolve
 		latency, err := requestLatency(ctx, client, cfg.TestURL, timeout, false)
 		if err == nil {
 			result := Result{Result: true, Latency: &latency, Reason: ReasonOK}
-			if cfg.MaxLatencyMS > 0 && latency > cfg.MaxLatencyMS {
+			if cfg.MaxLatencyMS > 0 && int(latency) > cfg.MaxLatencyMS {
 				result.Result = false
 				result.Reason = ReasonLatencyExceeded
 			}
@@ -387,7 +387,7 @@ func buildConfig(outbound json.RawMessage) ([]byte, error) {
 	return data, nil
 }
 
-func xrayHTTPTransport(instance *core.Instance, timeout_ms float64) *http.Transport {
+func xrayHTTPTransport(instance *core.Instance, timeout_ms int) *http.Transport {
 	timeout := time.Duration(timeout_ms) * time.Millisecond
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {

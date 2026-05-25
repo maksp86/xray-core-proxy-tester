@@ -30,8 +30,8 @@ func main() {
 	cfg := tester.Config{}
 	var outboundsFile string
 	var geoIP2Path string
-	var downloadTimeoutMS float64
-	var connectTimeoutMS float64
+	var downloadTimeoutMS int
+	var connectTimeoutMS int
 
 	flag.StringVar(&cfg.TestType, "test-type", "url", "test type: url or speed")
 	flag.StringVar(&cfg.TestURL, "url", "", "URL to test")
@@ -39,11 +39,11 @@ func main() {
 	flag.Var(&exitIPURLs, "exit-ip-url", "URL used to detect exit IP; may be repeated or comma-separated")
 	flag.StringVar(&outboundsFile, "outbounds-file", "", "JSON file with outbounds; stdin is used when omitted or set to '-'")
 	flag.StringVar(&geoIP2Path, "geoip2-db-path", "", "optional path to GeoIP2/GeoLite2 City database (.mmdb)")
-	flag.Float64Var(&downloadTimeoutMS, "download-timeout", 30000, "timeout for speed-test download")
-	flag.Float64Var(&connectTimeoutMS, "connect-timeout", 10000, "timeout for URL test and exit-IP requests")
+	flag.IntVar(&downloadTimeoutMS, "download-timeout", 30000, "timeout for speed-test download")
+	flag.IntVar(&connectTimeoutMS, "connect-timeout", 10000, "timeout for URL test and exit-IP requests")
 	flag.IntVar(&cfg.Parallelism, "parallelism", 1, "maximum number of outbounds tested concurrently")
 	flag.Float64Var(&cfg.MinSpeedMbps, "min-speed-mbps", 0, "optional minimum speed threshold; 0 disables speed_below_threshold")
-	flag.Float64Var(&cfg.MaxLatencyMS, "max-latency", 0, "optional maximum latency threshold; 0 disables latency_exceeded")
+	flag.IntVar(&cfg.MaxLatencyMS, "max-latency", 0, "optional maximum latency threshold; 0 disables latency_exceeded")
 	flag.Parse()
 
 	cfg.ExitIPURLs = exitIPURLs
