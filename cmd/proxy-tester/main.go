@@ -44,6 +44,7 @@ func main() {
 	flag.IntVar(&cfg.Parallelism, "parallelism", 1, "maximum number of outbounds tested concurrently")
 	flag.Float64Var(&cfg.MinSpeedMbps, "min-speed-mbps", 0, "optional minimum speed threshold; 0 disables speed_below_threshold")
 	flag.IntVar(&cfg.MaxLatencyMS, "max-latency", 0, "optional maximum latency threshold; 0 disables latency_exceeded")
+	flag.BoolVar(&cfg.AllowMux, "allow-mux", false, "preserve outbound mux settings instead of disabling mux during tests")
 	flag.Parse()
 
 	cfg.ExitIPURLs = exitIPURLs

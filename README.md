@@ -68,6 +68,7 @@ If `tag` is missing, the app assigns a stable tag such as `outbound-1`. Duplicat
 * `--parallelism`: maximum number of outbounds tested at once; each outbound runs in its own Xray instance without a local SOCKS proxy
 * `--min-speed-mbps`: optional minimum speed threshold; if not reached, the reason is `speed_below_threshold`
 * `--max-latency-ms`: optional maximum latency threshold; if exceeded, the reason is `latency_exceeded`
+* `--allow-mux`: preserve outbound `mux` settings; by default tests disable mux in the temporary Xray config to avoid lingering mux client connections
 
 ## Output format
 

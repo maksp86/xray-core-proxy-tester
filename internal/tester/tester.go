@@ -40,6 +40,7 @@ type Config struct {
 	MinSpeedMbps    float64
 	MaxLatencyMS    int
 	GeoIP2DBPath    string
+	AllowMux        bool
 }
 
 type Outbound struct {
@@ -163,7 +164,7 @@ func (cfg *Config) validate() error {
 }
 
 func testOutbound(ctx context.Context, cfg Config, outbound Outbound, geoResolver *geoResolver) Result {
-	configJSON, err := buildConfig(outbound.Raw)
+	configJSON, err := buildConfig(outbound.Raw, cfg.AllowMux)
 	if err != nil {
 		return Result{Result: false, Reason: ReasonInvalidOutbound}
 	}
@@ -365,13 +366,20 @@ func closeResponseBody(resp *http.Response) {
 	}
 }
 
-func buildConfig(outbound json.RawMessage) ([]byte, error) {
+func buildConfig(outbound json.RawMessage, allowMux bool) ([]byte, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(outbound, &probe); err != nil {
 		return nil, err
 	}
 	if _, ok := probe["protocol"]; !ok {
 		return nil, errors.New("outbound protocol is required")
+	}
+	if !allowMux {
+		var err error
+		outbound, err = disableMux(outbound)
+		if err != nil {
+			return nil, err
+		}
 	}
 	config := map[string]any{
 		"log":       map[string]any{"loglevel": "none", "access": "none", "error": "none"},
@@ -385,6 +393,20 @@ func buildConfig(outbound json.RawMessage) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+func disableMux(raw json.RawMessage) (json.RawMessage, error) {
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, err
+	}
+	obj["mux"] = map[string]any{
+		"enabled":         false,
+		"concurrency":     -1,
+		"xudpConcurrency": -1,
+		"xudpProxyUDP443": "skip",
+	}
+	return json.Marshal(obj)
 }
 
 func xrayHTTPTransport(instance *core.Instance, timeout_ms int) *http.Transport {
