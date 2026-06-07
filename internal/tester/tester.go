@@ -169,7 +169,7 @@ func testOutbound(ctx context.Context, cfg Config, outbound Outbound, geoResolve
 		return Result{Result: false, Reason: ReasonInvalidOutbound}
 	}
 
-	instance, err := core.StartInstance("json", configJSON)
+	instance, err := startXrayInstance(configJSON)
 	if err != nil {
 		return Result{Result: false, Reason: ReasonInvalidOutbound}
 	}
@@ -389,10 +389,28 @@ func buildConfig(outbound json.RawMessage, allowMux bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := core.LoadConfig("json", bytes.NewReader(data)); err != nil {
+	if _, err := loadXrayConfig(data); err != nil {
 		return nil, err
 	}
 	return data, nil
+}
+
+func loadXrayConfig(data []byte) (config *core.Config, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("xray config load panic: %v", r)
+		}
+	}()
+	return core.LoadConfig("json", bytes.NewReader(data))
+}
+
+func startXrayInstance(configJSON []byte) (instance *core.Instance, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("xray instance start panic: %v", r)
+		}
+	}()
+	return core.StartInstance("json", configJSON)
 }
 
 func disableMux(raw json.RawMessage) (json.RawMessage, error) {
