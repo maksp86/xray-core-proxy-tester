@@ -41,7 +41,7 @@ func main() {
 	flag.StringVar(&geoIP2Path, "geoip2-db-path", "", "optional path to GeoIP2/GeoLite2 City database (.mmdb)")
 	flag.IntVar(&downloadTimeoutMS, "download-timeout", 30000, "timeout for speed-test download")
 	flag.IntVar(&connectTimeoutMS, "connect-timeout", 10000, "timeout for URL test and exit-IP requests")
-	flag.IntVar(&cfg.Parallelism, "parallelism", 1, "maximum number of outbounds tested concurrently")
+	flag.IntVar(&cfg.Parallelism, "parallelism", 1, "maximum number of worker goroutines; all tests share one Xray instance per process")
 	flag.Float64Var(&cfg.MinSpeedMbps, "min-speed-mbps", 0, "optional minimum speed threshold; 0 disables speed_below_threshold")
 	flag.IntVar(&cfg.MaxLatencyMS, "max-latency", 0, "optional maximum latency threshold; 0 disables latency_exceeded")
 	flag.BoolVar(&cfg.AllowMux, "allow-mux", false, "preserve outbound mux settings instead of disabling mux during tests")

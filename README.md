@@ -1,6 +1,8 @@
 # Xray Core Proxy Tester
 
-A CLI wrapper for testing Xray `outbounds`. Each outbound is checked in its own Xray instance. The HTTP client uses Xray’s dispatcher and `core.Dial` directly to connect through the outbound under test. This follows the same general idea as Xray’s internal `observatory` / `burst` health checks, but skips the extra local proxy hop. After each test, the response body is closed, idle HTTP connections are closed, and the Xray instance is shut down.
+A CLI wrapper for testing Xray `outbounds`. Valid outbounds are loaded into one Xray instance, and each test uses Xray’s dispatcher plus `core.Dial` with the outbound tag forced for that request. This follows the same general idea as Xray’s internal `observatory` / `burst` health checks, but skips the extra local proxy hop. After each test, the response body is closed and idle HTTP connections are closed; after the run, the shared Xray instance is shut down.
+
+Xray-core uses process-global networking state and documents that only one `Server` instance should be running at a time. For that reason this tester starts one Xray instance per run inside a process, performs outbound tests through that instance, and then closes it. Running several tester processes still creates one running Xray instance per process.
 
 ## Xray-core
 
@@ -25,7 +27,7 @@ printf '[{"tag":"direct","protocol":"freedom","settings":{}}]' | \
     --url http://example.com \
     --retries 3 \
     --exit-ip-url https://api.ipify.org \
-    --connect-timeout 10s
+    --connect-timeout 10000
 ```
 
 Speed test:
@@ -35,7 +37,7 @@ go run ./cmd/proxy-tester \
   --test-type speed \
   --url https://example.com/file.bin \
   --outbounds-file outbounds.json \
-  --download-timeout 30s \
+  --download-timeout 30000 \
   --retries 2
 ```
 
@@ -62,10 +64,10 @@ If `tag` is missing, the app assigns a stable tag such as `outbound-1`. Duplicat
 * `--retries`: number of attempts per outbound
 * `--exit-ip-url`: URL used to detect the exit IP; may be repeated or passed as a comma-separated list
 * `--outbounds-file`: JSON file with outbounds; if omitted or set to `-`, stdin is used
-* `--download-timeout`: download timeout for speed tests
-* `--connect-timeout`: timeout for URL tests and exit IP requests
+* `--download-timeout`: download timeout for speed tests, in milliseconds
+* `--connect-timeout`: timeout for URL tests and exit IP requests, in milliseconds
 * `--geoip2-db-path`: optional path to GeoIP2/GeoLite2 City database (`.mmdb`); when set and exit IP is detected, adds `country` and `city` to result
-* `--parallelism`: maximum number of outbounds tested at once; each outbound runs in its own Xray instance without a local SOCKS proxy
+* `--parallelism`: maximum number of worker goroutines. All workers share one Xray instance inside the process
 * `--min-speed-mbps`: optional minimum speed threshold; if not reached, the reason is `speed_below_threshold`
 * `--max-latency-ms`: optional maximum latency threshold; if exceeded, the reason is `latency_exceeded`
 * `--allow-mux`: preserve outbound `mux` settings; by default tests disable mux in the temporary Xray config to avoid lingering mux client connections
@@ -88,3 +90,4 @@ If `tag` is missing, the app assigns a stable tag such as `outbound-1`. Duplicat
 
 `speed` is reported in megabits per second for `speed` tests. `latency` is reported in milliseconds for `url` tests.
 If GeoIP2 is not configured (or no data found), `country` / `city` are returned as `null`.
+HTTP 2xx and 3xx responses from the main test URL are considered valid. Redirects are not followed; a redirect response itself is enough for the URL test to pass.

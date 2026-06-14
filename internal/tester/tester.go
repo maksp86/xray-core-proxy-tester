@@ -17,6 +17,7 @@ import (
 
 	"github.com/oschwald/geoip2-golang"
 	xnet "github.com/xtls/xray-core/common/net"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/core"
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
@@ -28,6 +29,8 @@ const (
 	ReasonSpeedBelowThreshold = "speed_below_threshold"
 	ReasonLatencyExceeded     = "latency_exceeded"
 )
+
+var xrayRunMu sync.Mutex
 
 type Config struct {
 	TestType        string
@@ -112,7 +115,36 @@ func Run(ctx context.Context, cfg Config, outbounds []Outbound) (map[string]Resu
 	}
 	defer geoResolver.Close()
 
-	results := make(map[string]Result, len(outbounds))
+	validOutbounds, results := prepareOutbounds(outbounds, cfg.AllowMux)
+	if len(validOutbounds) == 0 {
+		return results, nil
+	}
+
+	configJSON, err := buildOutboundsConfig(validOutbounds)
+	if err != nil {
+		for _, outbound := range validOutbounds {
+			results[outbound.Tag] = Result{Result: false, Reason: ReasonInvalidOutbound}
+		}
+		return results, nil
+	}
+
+	// Xray-core keeps process-global dialer state and documents only one
+	// running Server instance at a time. Keep the whole instance lifecycle
+	// behind this guard, while allowing concurrent dials through that instance.
+	xrayRunMu.Lock()
+	instance, err := startXrayInstance(configJSON)
+	if err != nil {
+		xrayRunMu.Unlock()
+		for _, outbound := range validOutbounds {
+			results[outbound.Tag] = Result{Result: false, Reason: ReasonInvalidOutbound}
+		}
+		return results, nil
+	}
+	defer func() {
+		_ = instance.Close()
+		xrayRunMu.Unlock()
+	}()
+
 	jobs := make(chan Outbound)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -122,14 +154,14 @@ func Run(ctx context.Context, cfg Config, outbounds []Outbound) (map[string]Resu
 		go func() {
 			defer wg.Done()
 			for outbound := range jobs {
-				result := testOutbound(ctx, cfg, outbound, geoResolver)
+				result := testOutbound(ctx, cfg, outbound, geoResolver, instance)
 				mu.Lock()
 				results[outbound.Tag] = result
 				mu.Unlock()
 			}
 		}()
 	}
-	for _, outbound := range outbounds {
+	for _, outbound := range validOutbounds {
 		jobs <- outbound
 	}
 	close(jobs)
@@ -163,19 +195,8 @@ func (cfg *Config) validate() error {
 	return nil
 }
 
-func testOutbound(ctx context.Context, cfg Config, outbound Outbound, geoResolver *geoResolver) Result {
-	configJSON, err := buildConfig(outbound.Raw, cfg.AllowMux)
-	if err != nil {
-		return Result{Result: false, Reason: ReasonInvalidOutbound}
-	}
-
-	instance, err := startXrayInstance(configJSON)
-	if err != nil {
-		return Result{Result: false, Reason: ReasonInvalidOutbound}
-	}
-	defer instance.Close()
-
-	transport := xrayHTTPTransport(instance, cfg.ConnectTimeout)
+func testOutbound(ctx context.Context, cfg Config, outbound Outbound, geoResolver *geoResolver, instance *core.Instance) Result {
+	transport := xrayHTTPTransport(instance, cfg.ConnectTimeout, outbound.Tag)
 	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Transport: transport,
@@ -295,7 +316,7 @@ func requestLatency(ctx context.Context, client *http.Client, target string, tim
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	}
 	latency := float64(time.Since(start).Microseconds()) / 1000.0
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+	if !validTestHTTPStatus(resp.StatusCode) {
 		return latency, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 	return latency, nil
@@ -315,7 +336,7 @@ func downloadSpeed(ctx context.Context, client *http.Client, target string, time
 		return 0, err
 	}
 	defer closeResponseBody(resp)
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+	if !validTestHTTPStatus(resp.StatusCode) {
 		return 0, fmt.Errorf("unexpected status %d", resp.StatusCode)
 	}
 	bytesRead, err := io.Copy(io.Discard, resp.Body)
@@ -366,7 +387,47 @@ func closeResponseBody(resp *http.Response) {
 	}
 }
 
+func validTestHTTPStatus(statusCode int) bool {
+	return statusCode >= 200 && statusCode <= 399
+}
+
 func buildConfig(outbound json.RawMessage, allowMux bool) ([]byte, error) {
+	prepared, err := prepareOutboundRaw(outbound, allowMux)
+	if err != nil {
+		return nil, err
+	}
+	data, err := buildConfigJSON([]json.RawMessage{prepared})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := loadXrayConfig(data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func prepareOutbounds(outbounds []Outbound, allowMux bool) ([]Outbound, map[string]Result) {
+	results := make(map[string]Result, len(outbounds))
+	valid := make([]Outbound, 0, len(outbounds))
+	for _, outbound := range outbounds {
+		prepared, err := prepareOutboundRaw(outbound.Raw, allowMux)
+		if err == nil {
+			var configJSON []byte
+			configJSON, err = buildConfigJSON([]json.RawMessage{prepared})
+			if err == nil {
+				_, err = loadXrayConfig(configJSON)
+			}
+		}
+		if err != nil {
+			results[outbound.Tag] = Result{Result: false, Reason: ReasonInvalidOutbound}
+			continue
+		}
+		valid = append(valid, Outbound{Tag: outbound.Tag, Raw: prepared})
+	}
+	return valid, results
+}
+
+func prepareOutboundRaw(outbound json.RawMessage, allowMux bool) (json.RawMessage, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(outbound, &probe); err != nil {
 		return nil, err
@@ -381,15 +442,31 @@ func buildConfig(outbound json.RawMessage, allowMux bool) ([]byte, error) {
 			return nil, err
 		}
 	}
-	config := map[string]any{
-		"log":       map[string]any{"loglevel": "none", "access": "none", "error": "none"},
-		"outbounds": []json.RawMessage{outbound},
+	return outbound, nil
+}
+
+func buildOutboundsConfig(outbounds []Outbound) ([]byte, error) {
+	rawOutbounds := make([]json.RawMessage, 0, len(outbounds))
+	for _, outbound := range outbounds {
+		rawOutbounds = append(rawOutbounds, outbound.Raw)
 	}
-	data, err := json.Marshal(config)
+	data, err := buildConfigJSON(rawOutbounds)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := loadXrayConfig(data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func buildConfigJSON(outbounds []json.RawMessage) ([]byte, error) {
+	config := map[string]any{
+		"log":       map[string]any{"loglevel": "none", "access": "none", "error": "none"},
+		"outbounds": outbounds,
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
 		return nil, err
 	}
 	return data, nil
@@ -427,7 +504,7 @@ func disableMux(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(obj)
 }
 
-func xrayHTTPTransport(instance *core.Instance, timeout_ms int) *http.Transport {
+func xrayHTTPTransport(instance *core.Instance, timeout_ms int, outboundTag string) *http.Transport {
 	timeout := time.Duration(timeout_ms) * time.Millisecond
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -435,6 +512,7 @@ func xrayHTTPTransport(instance *core.Instance, timeout_ms int) *http.Transport 
 			if err != nil {
 				return nil, err
 			}
+			ctx = contextWithForcedOutboundTag(ctx, outboundTag)
 			conn, err := core.Dial(ctx, instance, dest)
 			if err != nil {
 				return nil, err
@@ -446,6 +524,25 @@ func xrayHTTPTransport(instance *core.Instance, timeout_ms int) *http.Transport 
 		DisableKeepAlives:     true,
 		ForceAttemptHTTP2:     false,
 	}
+}
+
+func contextWithForcedOutboundTag(ctx context.Context, outboundTag string) context.Context {
+	content := session.ContentFromContext(ctx)
+	if content == nil {
+		content = &session.Content{}
+	} else {
+		cloned := *content
+		if content.Attributes != nil {
+			cloned.Attributes = make(map[string]string, len(content.Attributes))
+			for key, value := range content.Attributes {
+				cloned.Attributes[key] = value
+			}
+		}
+		content = &cloned
+	}
+	content.SkipDNSResolve = true
+	ctx = session.ContextWithContent(ctx, content)
+	return session.SetForcedOutboundTagToContext(ctx, outboundTag)
 }
 
 func extractTag(raw json.RawMessage) string {
